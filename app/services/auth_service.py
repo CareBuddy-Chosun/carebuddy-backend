@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +18,11 @@ async def create_user(db: AsyncSession, data: RegisterRequest) -> User:
         email=data.email,
         hashed_password=hash_password(data.password),
         full_name=data.full_name,
+        date_of_birth=data.date_of_birth,
+        consent_data_storage=data.consent_data_storage,
+        consent_granted_at=(
+            datetime.now(timezone.utc) if data.consent_data_storage else None
+        ),
     )
     db.add(user)
     await db.commit()
