@@ -27,6 +27,7 @@ async def transcribe(
 
 class TTSRequest(BaseModel):
     text: str
+    voice: str = "ko-KR-SunHiNeural"
 
 
 @router.post("/synthesize")
@@ -34,5 +35,5 @@ async def synthesize(
     data: TTSRequest,
     current_user: User = Depends(get_current_user),
 ):
-    audio_bytes = await synthesize_speech(data.text)
+    audio_bytes = await synthesize_speech(data.text, voice=data.voice)
     return Response(content=audio_bytes, media_type="audio/mpeg")
