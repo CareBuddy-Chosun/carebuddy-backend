@@ -1,10 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import create_access_token, create_refresh_token, decode_token
 from app.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, TokenResponse
 from app.services.auth_service import authenticate_user, create_user, get_user_by_email
+from app.services.blocklist_service import block_token, is_blocked
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -34,6 +37,8 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh(data: RefreshRequest, db: AsyncSession = Depends(get_db)):
     from jose import JWTError
+    if await is_blocked(data.refresh_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
     try:
         payload = decode_token(data.refresh_token)
         if payload.get("type") != "refresh":
@@ -49,3 +54,23 @@ async def refresh(data: RefreshRequest, db: AsyncSession = Depends(get_db)):
         access_token=create_access_token(user.email),
         refresh_token=create_refresh_token(user.email),
     )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(data: RefreshRequest):
+    """Revoke a refresh token by adding it to the Redis blocklist.
+
+    Idempotent: an invalid/expired token still returns 204. The token is
+    blocklisted until its own expiry so refresh (FR-003) will reject it.
+    """
+    from jose import JWTError
+
+    try:
+        payload = decode_token(data.refresh_token)
+        exp = int(payload.get("exp", 0))
+        ttl = exp - int(datetime.now(timezone.utc).timestamp())
+        if ttl > 0:
+            await block_token(data.refresh_token, ttl)
+    except JWTError:
+        pass  # already invalid — nothing to revoke
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

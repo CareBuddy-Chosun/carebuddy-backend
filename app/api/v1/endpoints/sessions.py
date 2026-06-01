@@ -91,6 +91,18 @@ TRIAGE_GUIDANCE = {
     },
 }
 
+# Non-diagnostic disclaimer (FR-014) — language-aware.
+DISCLAIMER = {
+    "ko": (
+        "이것은 의료 진단이 아닙니다. CareBuddy는 분류 보조 도구일 뿐입니다. "
+        "반드시 전문 의료인의 진료를 받으세요."
+    ),
+    "en": (
+        "This is not a medical diagnosis. CareBuddy is a triage assistance tool "
+        "only. Always consult a qualified healthcare professional."
+    ),
+}
+
 EMERGENCY_REPLY = {
     "ko": (
         "의료 응급 상황으로 보입니다. "
@@ -195,6 +207,7 @@ async def send_message(
             level=triage_result.value.upper(),
             explanation=guidance["explanation"],
             next_steps=guidance["next_steps"],
+            disclaimer=DISCLAIMER[lang],
         )
 
     await db.commit()
