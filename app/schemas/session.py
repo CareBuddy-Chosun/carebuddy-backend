@@ -45,6 +45,9 @@ class TriageResultSchema(BaseModel):
         "반드시 전문 의료인의 진료를 받으세요."
     )
     emergency_keywords_detected: list[str] = []
+    # Recommended Korean medical department (e.g. "신경과") used as a nearby-
+    # hospital search keyword. None for emergencies (use ER search instead).
+    recommended_department: str | None = None
 
 
 class ChatResponse(BaseModel):

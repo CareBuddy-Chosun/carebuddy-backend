@@ -2,8 +2,8 @@ import uuid
 from datetime import datetime, timezone
 
 import openai
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -13,21 +13,30 @@ from app.core.database import get_db
 from app.models.guardian import Guardian
 from app.models.session import Message, Session
 from app.models.user import User
-from app.medical.retriever import retrieve_medical_context
+from app.medical.retriever import retrieve_top_condition
 from app.schemas.session import (
     ChatResponse,
     MessageRequest,
+    MessageSchema,
     SessionResponse,
     TriageResultSchema,
 )
 from app.schemas.user import NotificationItem, NotifyGuardiansResponse
 from app.triage.engine import (
+    REQUIRED_SLOTS,
     TriageResult,
+    ask_directive,
+    assess_conversation,
     build_triage_messages,
     check_emergency_keywords,
     clean_reply,
+    closing_directive,
+    closing_fallback,
     detect_language,
-    parse_triage_result,
+    fallback_question,
+    first_missing_slot,
+    format_conversation,
+    recommend_care,
     translate_to_english,
 )
 
@@ -119,6 +128,25 @@ EMERGENCY_REPLY = {
 }
 
 
+# Safety valve: finalize a triage after this many user turns even if the model
+# never self-reports all required slots, so a conversation can't loop forever.
+MAX_TURNS_BEFORE_TRIAGE = 8
+
+# Non-diagnostic reference shown with the final triage: the closest matching
+# condition from the medical DB (the user opted to show this as reference info).
+REFERENCE_INFO = {
+    "ko": (
+        "참고용 관련 정보: 입력하신 증상은 '{condition}'와(과) 관련이 있을 수 있습니다. "
+        "이는 진단이 아니며 참고용입니다. '{department}' 진료가 가능한 가까운 병원을 "
+        "찾아보시길 권장합니다."
+    ),
+    "en": (
+        "For reference: your symptoms may be related to '{condition}'. "
+        "This is not a diagnosis. Consider visiting a nearby '{department}' clinic."
+    ),
+}
+
+
 @router.post("", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
 async def create_session(
     current_user: User = Depends(get_current_user),
@@ -160,23 +188,43 @@ async def send_message(
     # Emergency keyword check
     is_emergency = check_emergency_keywords(data.content)
     if is_emergency:
-        reply = EMERGENCY_REPLY[lang]
+        reply = clean_reply(EMERGENCY_REPLY[lang])
         triage_result = TriageResult.EMERGENCY
     else:
         history = [
             {"role": msg.role, "content": msg.content} for msg in session.messages
         ]
-        # Operate internally in English: translate Korean queries so retrieval
-        # and reasoning run against the English MedQuAD corpus.
-        if lang == "ko":
-            query_en = await translate_to_english(
-                llm_client, settings.LLM_MODEL, data.content
-            )
+
+        # 1) Assess what the patient has provided so far (structured pass). This
+        #    is reliable about slot completeness; the conversational model is
+        #    not. We assess BEFORE replying so the SYSTEM drives the next turn.
+        conversation_text = format_conversation(history, data.content)
+        assessment = await assess_conversation(
+            llm_client, settings.LLM_MODEL, conversation_text
+        )
+        slots = (
+            assessment["slots"]
+            if assessment
+            else {slot: False for slot in REQUIRED_SLOTS}
+        )
+        user_turns = sum(1 for m in session.messages if m.role == "user") + 1
+        missing = first_missing_slot(slots)
+        finalize = missing is None or user_turns >= MAX_TURNS_BEFORE_TRIAGE
+
+        # 2) Drive the reply: ask about the first missing slot, or (when all
+        #    slots are filled / cap reached) give a brief close-out. The dialogue
+        #    stays in the user's own language so wording is read exactly.
+        if finalize:
+            triage_result = (assessment or {}).get("triage") or TriageResult.VISIT_HOSPITAL
+            directive = closing_directive(lang)
+            fallback = closing_fallback(lang)
         else:
-            query_en = data.content
-        context = await retrieve_medical_context(query_en)
+            triage_result = None
+            directive = ask_directive(lang, missing)
+            fallback = fallback_question(lang, missing)
+
         messages = build_triage_messages(
-            history, query_en, context=context, language=lang
+            history, data.content, language=lang, directive=directive
         )
         response = await llm_client.chat.completions.create(
             model=settings.LLM_MODEL,
@@ -184,11 +232,10 @@ async def send_message(
             max_tokens=300,
             temperature=0.3,
         )
-        reply = response.choices[0].message.content or ""
-        triage_result = parse_triage_result(reply)
-
-    # Strip the machine-readable TRIAGE tag so it never reaches the user / TTS.
-    reply = clean_reply(reply)
+        reply = clean_reply(response.choices[0].message.content or "")
+        # Never show an empty bubble — fall back to the templated line.
+        if not reply:
+            reply = fallback
 
     # Persist messages
     user_msg = Message(session_id=session.id, role="user", content=data.content)
@@ -203,11 +250,45 @@ async def send_message(
         session_complete = True
         session.ended_at = datetime.now(timezone.utc)
         guidance = TRIAGE_GUIDANCE[lang][triage_result]
+        explanation = guidance["explanation"]
+        recommended_department = None
+
+        # Search the medical DB with the full symptom picture and surface the
+        # closest matching condition + a recommended department (non-diagnostic).
+        if triage_result != TriageResult.EMERGENCY:
+            symptom_texts = [m.content for m in session.messages if m.role == "user"]
+            symptom_texts.append(data.content)
+            summary = " ".join(symptom_texts).strip()
+            summary_en = (
+                await translate_to_english(llm_client, settings.LLM_MODEL, summary)
+                if lang == "ko"
+                else summary
+            )
+            condition = await retrieve_top_condition(summary_en)
+            if condition:
+                # Localize the condition name + pick a Korean department to
+                # search nearby clinics for.
+                care = await recommend_care(
+                    llm_client, settings.LLM_MODEL, condition, summary
+                )
+                if care:
+                    recommended_department = care["department"]
+                    display_condition = (
+                        care["condition_ko"] if lang == "ko" else condition
+                    )
+                else:
+                    display_condition = condition
+                explanation = explanation + "\n\n" + REFERENCE_INFO[lang].format(
+                    condition=display_condition,
+                    department=recommended_department or "",
+                )
+
         triage_schema = TriageResultSchema(
             level=triage_result.value.upper(),
-            explanation=guidance["explanation"],
+            explanation=explanation,
             next_steps=guidance["next_steps"],
             disclaimer=DISCLAIMER[lang],
+            recommended_department=recommended_department,
         )
 
     await db.commit()
@@ -224,30 +305,57 @@ async def send_message(
     )
 
 
-@router.get("", response_model=list[SessionResponse])
+@router.get("")
 async def list_sessions(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    sort: str = Query("started_at_desc"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Paginated session summaries: {sessions: [...], pagination: {...}}."""
+    base = select(Session).where(Session.user_id == current_user.id)
+
+    total_count = (
+        await db.execute(select(func.count()).select_from(base.subquery()))
+    ).scalar_one()
+
+    order = (
+        Session.created_at.asc()
+        if sort == "started_at_asc"
+        else Session.created_at.desc()
+    )
     result = await db.execute(
-        select(Session)
-        .where(Session.user_id == current_user.id)
-        .options(selectinload(Session.messages))
-        .order_by(Session.created_at.desc())
+        base.order_by(order).offset((page - 1) * per_page).limit(per_page)
     )
     sessions = result.scalars().all()
-    return [
-        SessionResponse(
-            id=s.id,
-            status="completed" if s.ended_at else "active",
-            triage_level=s.triage_result.upper() if s.triage_result else None,
-            summary=s.summary,
-            started_at=s.created_at,
-            completed_at=s.ended_at,
-            messages=[],
-        )
-        for s in sessions
-    ]
+
+    total_pages = (total_count + per_page - 1) // per_page if total_count else 1
+
+    def _duration(s: Session) -> int | None:
+        if s.ended_at and s.created_at:
+            return int((s.ended_at - s.created_at).total_seconds())
+        return None
+
+    return {
+        "sessions": [
+            {
+                "id": str(s.id),
+                "status": "completed" if s.ended_at else "active",
+                "primary_symptom_tag": None,
+                "triage_level": s.triage_result.upper() if s.triage_result else None,
+                "started_at": s.created_at.isoformat() if s.created_at else None,
+                "duration_seconds": _duration(s),
+            }
+            for s in sessions
+        ],
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total_count": total_count,
+            "total_pages": total_pages,
+        },
+    }
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
@@ -264,6 +372,7 @@ async def get_session(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    ordered = sorted(session.messages, key=lambda m: m.created_at)
     return SessionResponse(
         id=session.id,
         status="completed" if session.ended_at else "active",
@@ -271,7 +380,15 @@ async def get_session(
         summary=session.summary,
         started_at=session.created_at,
         completed_at=session.ended_at,
-        messages=[],
+        messages=[
+            MessageSchema(
+                id=m.id,
+                role=m.role,
+                content=m.content,
+                created_at=m.created_at,
+            )
+            for m in ordered
+        ],
     )
 
 
