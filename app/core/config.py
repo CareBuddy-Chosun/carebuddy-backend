@@ -16,17 +16,15 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # Database
-    DATABASE_URL: str
+    DATABASE_URL: str = "sqlite+aiosqlite:///./carebuddy.db"
 
     # Redis
     REDIS_URL: str = "redis://redis:6379"
 
-    # OpenAI
-    OPENAI_API_KEY: str
-
-    # ElevenLabs
-    ELEVENLABS_API_KEY: str = ""
-    ELEVENLABS_VOICE_ID: str = ""
+    # LLM (OpenAI-compatible: works with OpenAI, Ollama, LM Studio)
+    OPENAI_API_KEY: str = "ollama"
+    OPENAI_BASE_URL: str = "http://localhost:11434/v1"
+    LLM_MODEL: str = "gemma2"
 
     # Google Maps
     GOOGLE_MAPS_API_KEY: str = ""

@@ -9,6 +9,7 @@ class MessageSchema(BaseModel):
     id: uuid.UUID
     role: Literal["user", "assistant"]
     content: str
+    input_type: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -16,22 +17,40 @@ class MessageSchema(BaseModel):
 
 class SessionResponse(BaseModel):
     id: uuid.UUID
-    triage_result: str | None
-    summary: str | None
-    created_at: datetime
-    ended_at: datetime | None
+    status: str = "active"
+    triage_level: str | None = None
+    triage_explanation: str | None = None
+    summary: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     messages: list[MessageSchema] = []
 
     model_config = {"from_attributes": True}
 
 
-class ChatRequest(BaseModel):
-    session_id: uuid.UUID
-    message: str
+class MessageRequest(BaseModel):
+    content: str
+    input_type: str = "text"
+
+
+class TriageResultSchema(BaseModel):
+    level: Literal["EMERGENCY", "VISIT_HOSPITAL", "HOME_CARE"]
+    explanation: str | None = None
+    next_steps: list[str] = []
+    disclaimer: str = (
+        "이것은 의료 진단이 아닙니다. CareBuddy는 분류 보조 도구일 뿐입니다. "
+        "반드시 전문 의료인의 진료를 받으세요."
+    )
+    emergency_keywords_detected: list[str] = []
 
 
 class ChatResponse(BaseModel):
     session_id: uuid.UUID
+    message_id: uuid.UUID | None = None
     reply: str
-    triage_result: str | None = None
+    tts_text: str | None = None
+    quick_reply_options: list[str] | None = None
+    triage_result: TriageResultSchema | None = None
     is_emergency: bool = False
+    session_complete: bool = False
+    timestamp: str | None = None

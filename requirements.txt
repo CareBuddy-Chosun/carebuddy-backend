@@ -5,8 +5,7 @@ uvicorn[standard]==0.29.0
 # Database
 sqlalchemy==2.0.30
 alembic==1.13.1
-asyncpg==0.29.0
-psycopg2-binary==2.9.9
+aiosqlite==0.20.0
 
 # Cache
 redis==5.0.4
@@ -23,9 +22,8 @@ langchain-openai==0.1.8
 langchain-community==0.2.1
 faiss-cpu==1.8.0
 
-# STT / TTS
-openai-whisper==20231117
-elevenlabs==1.2.0
+# TTS (edge-tts is free, no API key needed)
+edge-tts==7.2.8
 
 # Validation
 pydantic==2.7.1
