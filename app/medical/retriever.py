@@ -61,9 +61,17 @@ def _get_vectorstore() -> FAISS | None:
     return _vectorstore
 
 
-async def retrieve_medical_context(query: str, k: int = 3) -> list[str]:
+# Cap each retrieved snippet so the RAG context kept small — long MedQuAD answers
+# bloat the LLM prompt and slow inference with little triage benefit.
+_MAX_SNIPPET_CHARS = 400
+
+
+async def retrieve_medical_context(
+    query: str, k: int = 3, max_chars: int = _MAX_SNIPPET_CHARS
+) -> list[str]:
     """Return the top-k retrieved medical snippets (page_content) for a query.
 
+    Each snippet is truncated to ``max_chars`` to keep the triage prompt small.
     Returns [] if the index is missing or any error occurs.
     """
     if not query or not query.strip():
@@ -73,7 +81,7 @@ async def retrieve_medical_context(query: str, k: int = 3) -> list[str]:
         return []
     try:
         results = vs.similarity_search(query, k=k)
-        return [doc.page_content for doc in results]
+        return [doc.page_content[:max_chars].strip() for doc in results]
     except Exception:  # noqa: BLE001
         logger.exception("Medical retrieval failed for query: %r", query)
         return []
