@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
+from app.models.guardian import Guardian
 from app.models.session import Message, Session
 from app.models.user import User
 from app.schemas.session import (
@@ -18,6 +19,7 @@ from app.schemas.session import (
     SessionResponse,
     TriageResultSchema,
 )
+from app.schemas.user import NotificationItem, NotifyGuardiansResponse
 from app.triage.engine import (
     TriageResult,
     build_triage_messages,
@@ -198,3 +200,57 @@ async def get_session(
         completed_at=session.ended_at,
         messages=[],
     )
+
+
+async def _get_owned_session(
+    db: AsyncSession, session_id: uuid.UUID, current_user: User
+) -> Session:
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
+    if session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not your session"
+        )
+    return session
+
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    session = await _get_owned_session(db, session_id, current_user)
+    await db.delete(session)
+    await db.commit()
+
+
+@router.post("/{session_id}/notify-guardians", response_model=NotifyGuardiansResponse)
+async def notify_guardians(
+    session_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _get_owned_session(db, session_id, current_user)
+
+    guardians_result = await db.execute(
+        select(Guardian)
+        .where(Guardian.user_id == current_user.id)
+        .order_by(Guardian.created_at)
+    )
+    guardians = guardians_result.scalars().all()
+
+    # No real SMS provider (e.g. Twilio) configured yet -> stub the delivery.
+    notifications = [
+        NotificationItem(
+            guardian_name=guardian.name,
+            phone=guardian.phone,
+            status="stubbed",
+        )
+        for guardian in guardians
+    ]
+    return NotifyGuardiansResponse(notifications=notifications)
