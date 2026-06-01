@@ -2,7 +2,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     # Application
     APP_ENV: str = "development"
@@ -25,9 +27,15 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = "ollama"
     OPENAI_BASE_URL: str = "http://localhost:11434/v1"
     LLM_MODEL: str = "gemma2"
+    EMBEDDING_MODEL: str = "text-embedding-nomic-embed-text-v1.5"
 
-    # Google Maps
-    GOOGLE_MAPS_API_KEY: str = ""
+    # Maps (Naver Local Search API — Naver Developers credentials)
+    NAVER_CLIENT_ID: str = ""
+    NAVER_CLIENT_SECRET: str = ""
+
+    # Maps (Naver Cloud Platform — NCP Maps reverse geocoding, separate creds)
+    NAVER_MAPS_KEY_ID: str = ""
+    NAVER_MAPS_KEY: str = ""
 
     # Vector DB
     FAISS_INDEX_PATH: str = "./faiss_index"

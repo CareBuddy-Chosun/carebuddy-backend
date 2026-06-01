@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic import BaseModel, EmailStr
 
 
@@ -5,6 +7,8 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
     full_name: str
+    consent_data_storage: bool
+    date_of_birth: date | None = None
 
 
 class LoginRequest(BaseModel):

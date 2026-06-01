@@ -6,6 +6,21 @@ class HospitalResponse(BaseModel):
     name: str
     address: str
     distance_km: float
-    phone: str | None
-    specialty: str | None
+    phone: str | None = None
+    has_emergency_room: bool = False
+    specialties: list[str] = []
+    operating_hours: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
     maps_url: str
+
+
+class UserLocation(BaseModel):
+    latitude: float
+    longitude: float
+
+
+class HospitalSearchResponse(BaseModel):
+    hospitals: list[HospitalResponse]
+    search_radius_km: float
+    user_location: UserLocation

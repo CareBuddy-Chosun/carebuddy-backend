@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.core.database import Base
 import app.models.user  # noqa: F401
 import app.models.session  # noqa: F401
+import app.models.guardian  # noqa: F401
 
 config = context.config
 

@@ -12,6 +12,9 @@ services:
         condition: service_healthy
     volumes:
       - ./app:/app/app
+      - ./scripts:/app/scripts
+      - ../carebuddy-dataset/cleaned_data:/data:ro
+      - ./faiss_index:/app/faiss_index
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   db:

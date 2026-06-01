@@ -13,7 +13,7 @@ async def lifespan(app: FastAPI):
     # Auto-create tables in development only (production uses Alembic migrations)
     if settings.APP_ENV != "production":
         async with engine.begin() as conn:
-            from app.models import session, user  # noqa: F401
+            from app.models import guardian, session, user  # noqa: F401
             await conn.run_sync(Base.metadata.create_all)
     yield
 

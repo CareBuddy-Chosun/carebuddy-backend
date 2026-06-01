@@ -10,19 +10,25 @@ from sqlalchemy.orm import selectinload
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
+from app.models.guardian import Guardian
 from app.models.session import Message, Session
 from app.models.user import User
+from app.medical.retriever import retrieve_medical_context
 from app.schemas.session import (
     ChatResponse,
     MessageRequest,
     SessionResponse,
     TriageResultSchema,
 )
+from app.schemas.user import NotificationItem, NotifyGuardiansResponse
 from app.triage.engine import (
     TriageResult,
     build_triage_messages,
     check_emergency_keywords,
+    clean_reply,
+    detect_language,
     parse_triage_result,
+    translate_to_english,
 )
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -33,29 +39,83 @@ llm_client = openai.AsyncOpenAI(
 )
 
 TRIAGE_GUIDANCE = {
-    TriageResult.EMERGENCY: {
-        "explanation": "응급 상황으로 판단됩니다.",
-        "next_steps": [
-            "즉시 119에 전화하세요.",
-            "가까운 응급실로 이동하세요.",
-            "보호자에게 알리세요.",
-        ],
+    "ko": {
+        TriageResult.EMERGENCY: {
+            "explanation": "응급 상황으로 판단됩니다.",
+            "next_steps": [
+                "즉시 119에 전화하세요.",
+                "가까운 응급실로 이동하세요.",
+                "보호자에게 알리세요.",
+            ],
+        },
+        TriageResult.VISIT_HOSPITAL: {
+            "explanation": "24시간 이내에 병원 방문이 권장됩니다.",
+            "next_steps": [
+                "가까운 병원이나 의원을 방문하세요.",
+                "증상이 악화되면 응급실로 가세요.",
+            ],
+        },
+        TriageResult.HOME_CARE: {
+            "explanation": "가정에서 경과를 관찰하셔도 됩니다.",
+            "next_steps": [
+                "충분한 휴식을 취하세요.",
+                "수분을 충분히 섭취하세요.",
+                "증상이 지속되거나 악화되면 병원을 방문하세요.",
+            ],
+        },
     },
-    TriageResult.VISIT_HOSPITAL: {
-        "explanation": "24시간 이내에 병원 방문이 권장됩니다.",
-        "next_steps": [
-            "가까운 병원이나 의원을 방문하세요.",
-            "증상이 악화되면 응급실로 가세요.",
-        ],
+    "en": {
+        TriageResult.EMERGENCY: {
+            "explanation": "This appears to be an emergency.",
+            "next_steps": [
+                "Call emergency services (911/119) immediately.",
+                "Go to the nearest emergency room.",
+                "Notify your guardian.",
+            ],
+        },
+        TriageResult.VISIT_HOSPITAL: {
+            "explanation": "A hospital visit within 24 hours is recommended.",
+            "next_steps": [
+                "Visit a nearby hospital or clinic.",
+                "Go to the emergency room if symptoms worsen.",
+            ],
+        },
+        TriageResult.HOME_CARE: {
+            "explanation": "You may monitor your condition at home.",
+            "next_steps": [
+                "Get plenty of rest.",
+                "Stay well hydrated.",
+                "Visit a hospital if symptoms persist or worsen.",
+            ],
+        },
     },
-    TriageResult.HOME_CARE: {
-        "explanation": "가정에서 경과를 관찰하셔도 됩니다.",
-        "next_steps": [
-            "충분한 휴식을 취하세요.",
-            "수분을 충분히 섭취하세요.",
-            "증상이 지속되거나 악화되면 병원을 방문하세요.",
-        ],
-    },
+}
+
+# Non-diagnostic disclaimer (FR-014) — language-aware.
+DISCLAIMER = {
+    "ko": (
+        "이것은 의료 진단이 아닙니다. CareBuddy는 분류 보조 도구일 뿐입니다. "
+        "반드시 전문 의료인의 진료를 받으세요."
+    ),
+    "en": (
+        "This is not a medical diagnosis. CareBuddy is a triage assistance tool "
+        "only. Always consult a qualified healthcare professional."
+    ),
+}
+
+EMERGENCY_REPLY = {
+    "ko": (
+        "의료 응급 상황으로 보입니다. "
+        "즉시 119에 전화하거나 가까운 응급실로 가세요. "
+        "저는 의료 전문가가 아니며, 이것은 진단이 아닙니다. "
+        "TRIAGE: EMERGENCY"
+    ),
+    "en": (
+        "This appears to be a medical emergency. "
+        "Call emergency services (911/119) or go to the nearest emergency room "
+        "immediately. I am not a medical professional, and this is not a diagnosis. "
+        "TRIAGE: EMERGENCY"
+    ),
 }
 
 
@@ -92,29 +152,43 @@ async def send_message(
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
+    # Resolve the reply language: explicit toggle wins, else auto-detect.
+    lang = data.language or detect_language(data.content)
+    if lang not in ("ko", "en"):
+        lang = "ko"
+
     # Emergency keyword check
     is_emergency = check_emergency_keywords(data.content)
     if is_emergency:
-        reply = (
-            "의료 응급 상황으로 보입니다. "
-            "즉시 119에 전화하거나 가까운 응급실로 가세요. "
-            "저는 의료 전문가가 아니며, 이것은 진단이 아닙니다. "
-            "TRIAGE: EMERGENCY"
-        )
+        reply = EMERGENCY_REPLY[lang]
         triage_result = TriageResult.EMERGENCY
     else:
         history = [
             {"role": msg.role, "content": msg.content} for msg in session.messages
         ]
-        messages = build_triage_messages(history, data.content)
+        # Operate internally in English: translate Korean queries so retrieval
+        # and reasoning run against the English MedQuAD corpus.
+        if lang == "ko":
+            query_en = await translate_to_english(
+                llm_client, settings.LLM_MODEL, data.content
+            )
+        else:
+            query_en = data.content
+        context = await retrieve_medical_context(query_en)
+        messages = build_triage_messages(
+            history, query_en, context=context, language=lang
+        )
         response = await llm_client.chat.completions.create(
             model=settings.LLM_MODEL,
             messages=messages,
             max_tokens=300,
             temperature=0.3,
         )
-        reply = response.choices[0].message.content
+        reply = response.choices[0].message.content or ""
         triage_result = parse_triage_result(reply)
+
+    # Strip the machine-readable TRIAGE tag so it never reaches the user / TTS.
+    reply = clean_reply(reply)
 
     # Persist messages
     user_msg = Message(session_id=session.id, role="user", content=data.content)
@@ -128,11 +202,12 @@ async def send_message(
         session.triage_result = triage_result.value
         session_complete = True
         session.ended_at = datetime.now(timezone.utc)
-        guidance = TRIAGE_GUIDANCE[triage_result]
+        guidance = TRIAGE_GUIDANCE[lang][triage_result]
         triage_schema = TriageResultSchema(
             level=triage_result.value.upper(),
             explanation=guidance["explanation"],
             next_steps=guidance["next_steps"],
+            disclaimer=DISCLAIMER[lang],
         )
 
     await db.commit()
@@ -198,3 +273,57 @@ async def get_session(
         completed_at=session.ended_at,
         messages=[],
     )
+
+
+async def _get_owned_session(
+    db: AsyncSession, session_id: uuid.UUID, current_user: User
+) -> Session:
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
+    if session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not your session"
+        )
+    return session
+
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    session = await _get_owned_session(db, session_id, current_user)
+    await db.delete(session)
+    await db.commit()
+
+
+@router.post("/{session_id}/notify-guardians", response_model=NotifyGuardiansResponse)
+async def notify_guardians(
+    session_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _get_owned_session(db, session_id, current_user)
+
+    guardians_result = await db.execute(
+        select(Guardian)
+        .where(Guardian.user_id == current_user.id)
+        .order_by(Guardian.created_at)
+    )
+    guardians = guardians_result.scalars().all()
+
+    # No real SMS provider (e.g. Twilio) configured yet -> stub the delivery.
+    notifications = [
+        NotificationItem(
+            guardian_name=guardian.name,
+            phone=guardian.phone,
+            status="stubbed",
+        )
+        for guardian in guardians
+    ]
+    return NotifyGuardiansResponse(notifications=notifications)
