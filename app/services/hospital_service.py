@@ -16,6 +16,7 @@ Without the NCP keys, search degrades gracefully to a plain nationwide keyword s
 
 import math
 import re
+import urllib.parse
 
 import httpx
 
@@ -35,6 +36,14 @@ NCP_REVERSE_GEOCODE_URL = (
 NAVER_MAX_DISPLAY = 5
 
 _B_TAG_RE = re.compile(r"</?b>")
+
+# Facility types that typically operate an emergency room.
+_ER_KEYWORDS = ("응급", "종합병원", "대학병원", "대학교병원", "의료원", "권역외상")
+
+# Specialties that are clearly NOT emergency care — filtered out of EMERGENCY results.
+_NON_EMERGENCY_KEYWORDS = (
+    "한의원", "한방", "치과", "피부과", "성형외과", "안과", "약국", "동물병원",
+)
 
 
 async def find_nearby_hospitals(
@@ -85,7 +94,8 @@ async def find_nearby_hospitals(
         else:
             distance_km = 0.0
 
-        has_emergency_room = "응급" in category or "응급" in name
+        haystack = f"{name} {category}"
+        has_emergency_room = any(kw in haystack for kw in _ER_KEYWORDS)
 
         hospitals.append(
             HospitalResponse(
@@ -99,9 +109,25 @@ async def find_nearby_hospitals(
                 operating_hours=None,
                 latitude=place_lat,
                 longitude=place_lng,
-                maps_url=link or _naver_map_search_url(name),
+                # always a Naver map deep link (the Naver `link` field is the
+                # business homepage — blog/youtube/etc — unsuitable for navigation)
+                maps_url=_naver_map_search_url(name, address),
             )
         )
+
+    # For EMERGENCY, drop clearly non-emergency clinics (한의원/치과/...) that
+    # Naver relevance may mix in. Fall back to the full list if filtering empties it.
+    if (triage_level or "").upper() == "EMERGENCY":
+        filtered = [
+            h
+            for h in hospitals
+            if not any(
+                kw in f"{h.name} {' '.join(h.specialties)}"
+                for kw in _NON_EMERGENCY_KEYWORDS
+            )
+        ]
+        if filtered:
+            hospitals = filtered
 
     hospitals.sort(key=lambda h: h.distance_km)
     return hospitals[:limit]
@@ -155,10 +181,9 @@ async def reverse_geocode(lat: float, lng: float) -> str | None:
 def _naver_to_wgs84(mapx, mapy) -> tuple[float | None, float | None]:
     """Convert Naver local search mapx/mapy to WGS84 (lng, lat) -> (lat, lng).
 
-    Naver local search mapx/mapy are integer strings. We assume WGS84 scaled by
-    1e7 (e.g. "1269712017" -> 126.9712017). mapx is longitude, mapy is latitude.
-
-    # TODO: verify coordinate scale against a real Naver response
+    Naver local search mapx/mapy are integer strings in WGS84 scaled by 1e7
+    (e.g. "1270258189" -> 127.0258189). mapx is longitude, mapy is latitude.
+    Verified live (2026-06) against a real 역삼동 response.
     """
     try:
         if mapx in (None, "") or mapy in (None, ""):
@@ -178,8 +203,10 @@ def _place_id(link: str, address: str, name: str) -> str:
     return re.sub(r"\s+", "-", slug)
 
 
-def _naver_map_search_url(name: str) -> str:
-    return f"https://map.naver.com/v5/search/{name}"
+def _naver_map_search_url(name: str, address: str = "") -> str:
+    """Naver map search deep link (opens the place in the Naver Map app/web)."""
+    query = f"{address} {name}".strip() if address else name
+    return f"https://map.naver.com/p/search/{urllib.parse.quote(query)}"
 
 
 def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
