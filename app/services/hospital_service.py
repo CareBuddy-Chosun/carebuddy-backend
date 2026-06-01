@@ -52,8 +52,17 @@ async def find_nearby_hospitals(
     radius_km: float = 10.0,
     limit: int = 5,
     triage_level: str | None = None,
+    department: str | None = None,
 ) -> list[HospitalResponse]:
-    keyword = "응급실" if (triage_level or "").upper() == "EMERGENCY" else "병원"
+    # Emergencies always search ERs. Otherwise, if the triage recommended a
+    # specific department (e.g. "신경과"), search for that clinic type; else a
+    # generic hospital search.
+    if (triage_level or "").upper() == "EMERGENCY":
+        keyword = "응급실"
+    elif department:
+        keyword = department
+    else:
+        keyword = "병원"
 
     # location-aware: reverse-geocode GPS → region keyword; falls back to plain
     # keyword if NCP keys absent

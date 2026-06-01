@@ -15,6 +15,9 @@ async def nearby_hospitals(
     radius_km: float = Query(10, gt=0, le=50, description="Search radius in km"),
     limit: int = Query(5, ge=1, le=10, description="Max results"),
     triage_level: str | None = Query(None, description="Triage level (e.g. EMERGENCY)"),
+    department: str | None = Query(
+        None, description="Recommended Korean department keyword (e.g. 신경과)"
+    ),
     current_user: User = Depends(get_current_user),
 ):
     hospitals = await find_nearby_hospitals(
@@ -23,6 +26,7 @@ async def nearby_hospitals(
         radius_km=radius_km,
         limit=limit,
         triage_level=triage_level,
+        department=department,
     )
     return HospitalSearchResponse(
         hospitals=hospitals,
