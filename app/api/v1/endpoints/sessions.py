@@ -24,6 +24,7 @@ from app.triage.engine import (
     TriageResult,
     build_triage_messages,
     check_emergency_keywords,
+    clean_reply,
     parse_triage_result,
 )
 
@@ -115,8 +116,11 @@ async def send_message(
             max_tokens=300,
             temperature=0.3,
         )
-        reply = response.choices[0].message.content
+        reply = response.choices[0].message.content or ""
         triage_result = parse_triage_result(reply)
+
+    # Strip the machine-readable TRIAGE tag so it never reaches the user / TTS.
+    reply = clean_reply(reply)
 
     # Persist messages
     user_msg = Message(session_id=session.id, role="user", content=data.content)

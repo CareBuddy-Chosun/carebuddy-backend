@@ -3,7 +3,9 @@ import io
 import edge_tts
 
 
-async def synthesize_speech(text: str, voice: str = "ko-KR-SunHiNeural") -> bytes:
+async def synthesize_speech(
+    text: str, voice: str = "ko-KR-SunHiNeural", speed: float | None = None
+) -> bytes:
     """Convert text to speech using Microsoft Edge TTS (free).
 
     Available Korean voices:
@@ -12,8 +14,16 @@ async def synthesize_speech(text: str, voice: str = "ko-KR-SunHiNeural") -> byte
     English voices:
       - en-US-JennyNeural   (female)
       - en-US-GuyNeural     (male)
+
+    `speed` is a multiplier (1.0 = normal). It is mapped to edge-tts's
+    percentage `rate` (e.g. 1.2 -> "+20%", 0.8 -> "-20%").
     """
-    communicate = edge_tts.Communicate(text, voice)
+    kwargs = {}
+    if speed is not None and speed > 0 and speed != 1.0:
+        percent = round((speed - 1.0) * 100)
+        kwargs["rate"] = f"{percent:+d}%"
+
+    communicate = edge_tts.Communicate(text, voice, **kwargs)
     audio_buffer = io.BytesIO()
 
     async for chunk in communicate.stream():

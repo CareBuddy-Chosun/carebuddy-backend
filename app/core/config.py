@@ -28,8 +28,13 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "http://localhost:11434/v1"
     LLM_MODEL: str = "gemma2"
 
-    # Google Maps
-    GOOGLE_MAPS_API_KEY: str = ""
+    # Maps (Naver Local Search API — Naver Developers credentials)
+    NAVER_CLIENT_ID: str = ""
+    NAVER_CLIENT_SECRET: str = ""
+
+    # Maps (Naver Cloud Platform — NCP Maps reverse geocoding, separate creds)
+    NAVER_MAPS_KEY_ID: str = ""
+    NAVER_MAPS_KEY: str = ""
 
     # Vector DB
     FAISS_INDEX_PATH: str = "./faiss_index"

@@ -1,3 +1,4 @@
+import re
 from enum import Enum
 
 EMERGENCY_KEYWORDS = [
@@ -60,3 +61,15 @@ def parse_triage_result(reply: str) -> TriageResult | None:
     if "TRIAGE: HOME_CARE" in reply:
         return TriageResult.HOME_CARE
     return None
+
+
+# Strip the machine-readable "TRIAGE: <LEVEL>" tag (and trailing whitespace) so it
+# never leaks into the user-facing reply text or TTS audio.
+_TRIAGE_TAG_RE = re.compile(
+    r"\s*TRIAGE:\s*(EMERGENCY|VISIT_HOSPITAL|HOME_CARE)\s*", re.IGNORECASE
+)
+
+
+def clean_reply(reply: str) -> str:
+    """Remove the TRIAGE meta tag from a reply for display/TTS."""
+    return _TRIAGE_TAG_RE.sub(" ", reply).strip()
