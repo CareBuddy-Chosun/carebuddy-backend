@@ -31,6 +31,9 @@ class SessionResponse(BaseModel):
 class MessageRequest(BaseModel):
     content: str
     input_type: str = "text"
+    # Optional UI language toggle ("ko"/"en"). When omitted the backend
+    # auto-detects from the message content.
+    language: str | None = None
 
 
 class TriageResultSchema(BaseModel):

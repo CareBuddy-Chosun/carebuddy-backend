@@ -1,5 +1,8 @@
+import logging
 import re
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 EMERGENCY_KEYWORDS = [
     # Korean
@@ -27,6 +30,41 @@ def check_emergency_keywords(text: str) -> bool:
     return any(keyword in text_lower for keyword in EMERGENCY_KEYWORDS)
 
 
+def detect_language(text: str) -> str:
+    """Return "ko" if any Hangul syllable is present, else "en"."""
+    return "ko" if any("가" <= ch <= "힣" for ch in text) else "en"
+
+
+async def translate_to_english(client, model: str, text: str) -> str:
+    """Translate ``text`` to English via the LLM.
+
+    Returns the original text unchanged on any error (graceful degradation).
+    """
+    if not text or not text.strip():
+        return text
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Translate the user's message to English. "
+                        "Output ONLY the translation, no quotes, no explanation."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            temperature=0,
+            max_tokens=300,
+        )
+        translated = (response.choices[0].message.content or "").strip()
+        return translated or text
+    except Exception:  # noqa: BLE001
+        logger.exception("Translation to English failed; using original text.")
+        return text
+
+
 TRIAGE_SYSTEM_PROMPT = """당신은 CareBuddy, 음성 기반 AI 의료 분류 도우미입니다.
 사용자의 증상을 파악하고 다음 세 가지 중 하나를 권장해 주세요:
 1. EMERGENCY - 119에 전화하거나 즉시 응급실로 가세요
@@ -42,14 +80,43 @@ TRIAGE_SYSTEM_PROMPT = """당신은 CareBuddy, 음성 기반 AI 의료 분류 �
 - 충분한 정보를 얻어 분류 권장을 할 수 있을 때, 응답 마지막에 다음을 추가하세요:
   TRIAGE: <EMERGENCY|VISIT_HOSPITAL|HOME_CARE>
 - 병원 추천을 요청받으면, 증상을 먼저 파악한 후 VISIT_HOSPITAL을 권장하세요
-- 반드시 한국어로 답변하세요
 """
 
+_OUTPUT_LANGUAGE_INSTRUCTION = {
+    "ko": "반드시 한국어로 답변하세요.",
+    "en": "Always respond in English.",
+}
 
-def build_triage_messages(history: list[dict], user_message: str) -> list[dict]:
+
+def build_triage_messages(
+    history: list[dict],
+    user_message: str,
+    context: list[str] | None = None,
+    language: str = "ko",
+) -> list[dict]:
     messages = [{"role": "system", "content": TRIAGE_SYSTEM_PROMPT}]
+    if context:
+        joined = "\n\n---\n\n".join(context)
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "다음은 참고용 의료 정보입니다. "
+                    "진단이 아니라 분류 판단에만 활용하세요:\n\n" + joined
+                ),
+            }
+        )
     messages.extend(history)
     messages.append({"role": "user", "content": user_message})
+    # Force the output language dynamically (placed last for strongest effect).
+    messages.append(
+        {
+            "role": "system",
+            "content": _OUTPUT_LANGUAGE_INSTRUCTION.get(
+                language, _OUTPUT_LANGUAGE_INSTRUCTION["ko"]
+            ),
+        }
+    )
     return messages
 
 

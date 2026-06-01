@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = "ollama"
     OPENAI_BASE_URL: str = "http://localhost:11434/v1"
     LLM_MODEL: str = "gemma2"
+    EMBEDDING_MODEL: str = "text-embedding-nomic-embed-text-v1.5"
 
     # Maps (Naver Local Search API — Naver Developers credentials)
     NAVER_CLIENT_ID: str = ""

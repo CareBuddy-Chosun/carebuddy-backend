@@ -13,6 +13,7 @@ from app.core.database import get_db
 from app.models.guardian import Guardian
 from app.models.session import Message, Session
 from app.models.user import User
+from app.medical.retriever import retrieve_medical_context
 from app.schemas.session import (
     ChatResponse,
     MessageRequest,
@@ -25,7 +26,9 @@ from app.triage.engine import (
     build_triage_messages,
     check_emergency_keywords,
     clean_reply,
+    detect_language,
     parse_triage_result,
+    translate_to_english,
 )
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -36,29 +39,71 @@ llm_client = openai.AsyncOpenAI(
 )
 
 TRIAGE_GUIDANCE = {
-    TriageResult.EMERGENCY: {
-        "explanation": "응급 상황으로 판단됩니다.",
-        "next_steps": [
-            "즉시 119에 전화하세요.",
-            "가까운 응급실로 이동하세요.",
-            "보호자에게 알리세요.",
-        ],
+    "ko": {
+        TriageResult.EMERGENCY: {
+            "explanation": "응급 상황으로 판단됩니다.",
+            "next_steps": [
+                "즉시 119에 전화하세요.",
+                "가까운 응급실로 이동하세요.",
+                "보호자에게 알리세요.",
+            ],
+        },
+        TriageResult.VISIT_HOSPITAL: {
+            "explanation": "24시간 이내에 병원 방문이 권장됩니다.",
+            "next_steps": [
+                "가까운 병원이나 의원을 방문하세요.",
+                "증상이 악화되면 응급실로 가세요.",
+            ],
+        },
+        TriageResult.HOME_CARE: {
+            "explanation": "가정에서 경과를 관찰하셔도 됩니다.",
+            "next_steps": [
+                "충분한 휴식을 취하세요.",
+                "수분을 충분히 섭취하세요.",
+                "증상이 지속되거나 악화되면 병원을 방문하세요.",
+            ],
+        },
     },
-    TriageResult.VISIT_HOSPITAL: {
-        "explanation": "24시간 이내에 병원 방문이 권장됩니다.",
-        "next_steps": [
-            "가까운 병원이나 의원을 방문하세요.",
-            "증상이 악화되면 응급실로 가세요.",
-        ],
+    "en": {
+        TriageResult.EMERGENCY: {
+            "explanation": "This appears to be an emergency.",
+            "next_steps": [
+                "Call emergency services (911/119) immediately.",
+                "Go to the nearest emergency room.",
+                "Notify your guardian.",
+            ],
+        },
+        TriageResult.VISIT_HOSPITAL: {
+            "explanation": "A hospital visit within 24 hours is recommended.",
+            "next_steps": [
+                "Visit a nearby hospital or clinic.",
+                "Go to the emergency room if symptoms worsen.",
+            ],
+        },
+        TriageResult.HOME_CARE: {
+            "explanation": "You may monitor your condition at home.",
+            "next_steps": [
+                "Get plenty of rest.",
+                "Stay well hydrated.",
+                "Visit a hospital if symptoms persist or worsen.",
+            ],
+        },
     },
-    TriageResult.HOME_CARE: {
-        "explanation": "가정에서 경과를 관찰하셔도 됩니다.",
-        "next_steps": [
-            "충분한 휴식을 취하세요.",
-            "수분을 충분히 섭취하세요.",
-            "증상이 지속되거나 악화되면 병원을 방문하세요.",
-        ],
-    },
+}
+
+EMERGENCY_REPLY = {
+    "ko": (
+        "의료 응급 상황으로 보입니다. "
+        "즉시 119에 전화하거나 가까운 응급실로 가세요. "
+        "저는 의료 전문가가 아니며, 이것은 진단이 아닙니다. "
+        "TRIAGE: EMERGENCY"
+    ),
+    "en": (
+        "This appears to be a medical emergency. "
+        "Call emergency services (911/119) or go to the nearest emergency room "
+        "immediately. I am not a medical professional, and this is not a diagnosis. "
+        "TRIAGE: EMERGENCY"
+    ),
 }
 
 
@@ -95,21 +140,32 @@ async def send_message(
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
+    # Resolve the reply language: explicit toggle wins, else auto-detect.
+    lang = data.language or detect_language(data.content)
+    if lang not in ("ko", "en"):
+        lang = "ko"
+
     # Emergency keyword check
     is_emergency = check_emergency_keywords(data.content)
     if is_emergency:
-        reply = (
-            "의료 응급 상황으로 보입니다. "
-            "즉시 119에 전화하거나 가까운 응급실로 가세요. "
-            "저는 의료 전문가가 아니며, 이것은 진단이 아닙니다. "
-            "TRIAGE: EMERGENCY"
-        )
+        reply = EMERGENCY_REPLY[lang]
         triage_result = TriageResult.EMERGENCY
     else:
         history = [
             {"role": msg.role, "content": msg.content} for msg in session.messages
         ]
-        messages = build_triage_messages(history, data.content)
+        # Operate internally in English: translate Korean queries so retrieval
+        # and reasoning run against the English MedQuAD corpus.
+        if lang == "ko":
+            query_en = await translate_to_english(
+                llm_client, settings.LLM_MODEL, data.content
+            )
+        else:
+            query_en = data.content
+        context = await retrieve_medical_context(query_en)
+        messages = build_triage_messages(
+            history, query_en, context=context, language=lang
+        )
         response = await llm_client.chat.completions.create(
             model=settings.LLM_MODEL,
             messages=messages,
@@ -134,7 +190,7 @@ async def send_message(
         session.triage_result = triage_result.value
         session_complete = True
         session.ended_at = datetime.now(timezone.utc)
-        guidance = TRIAGE_GUIDANCE[triage_result]
+        guidance = TRIAGE_GUIDANCE[lang][triage_result]
         triage_schema = TriageResultSchema(
             level=triage_result.value.upper(),
             explanation=guidance["explanation"],
