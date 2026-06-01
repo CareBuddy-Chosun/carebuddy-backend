@@ -12,7 +12,12 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.models.session import Message, Session
 from app.models.user import User
-from app.schemas.session import ChatResponse, MessageRequest, SessionResponse
+from app.schemas.session import (
+    ChatResponse,
+    MessageRequest,
+    SessionResponse,
+    TriageResultSchema,
+)
 from app.triage.engine import (
     TriageResult,
     build_triage_messages,
@@ -26,6 +31,32 @@ llm_client = openai.AsyncOpenAI(
     api_key=settings.OPENAI_API_KEY,
     base_url=settings.OPENAI_BASE_URL,
 )
+
+TRIAGE_GUIDANCE = {
+    TriageResult.EMERGENCY: {
+        "explanation": "응급 상황으로 판단됩니다.",
+        "next_steps": [
+            "즉시 119에 전화하세요.",
+            "가까운 응급실로 이동하세요.",
+            "보호자에게 알리세요.",
+        ],
+    },
+    TriageResult.VISIT_HOSPITAL: {
+        "explanation": "24시간 이내에 병원 방문이 권장됩니다.",
+        "next_steps": [
+            "가까운 병원이나 의원을 방문하세요.",
+            "증상이 악화되면 응급실로 가세요.",
+        ],
+    },
+    TriageResult.HOME_CARE: {
+        "explanation": "가정에서 경과를 관찰하셔도 됩니다.",
+        "next_steps": [
+            "충분한 휴식을 취하세요.",
+            "수분을 충분히 섭취하세요.",
+            "증상이 지속되거나 악화되면 병원을 방문하세요.",
+        ],
+    },
+}
 
 
 @router.post("", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
@@ -65,9 +96,9 @@ async def send_message(
     is_emergency = check_emergency_keywords(data.content)
     if is_emergency:
         reply = (
-            "This sounds like a medical emergency. "
-            "Please call 119 or go to the nearest emergency room immediately. "
-            "I am not a medical professional. This is not a diagnosis. "
+            "의료 응급 상황으로 보입니다. "
+            "즉시 119에 전화하거나 가까운 응급실로 가세요. "
+            "저는 의료 전문가가 아니며, 이것은 진단이 아닙니다. "
             "TRIAGE: EMERGENCY"
         )
         triage_result = TriageResult.EMERGENCY
@@ -92,21 +123,17 @@ async def send_message(
     db.add(assistant_msg)
 
     session_complete = False
-    triage_dict = None
+    triage_schema = None
     if triage_result:
         session.triage_result = triage_result.value
         session_complete = True
         session.ended_at = datetime.now(timezone.utc)
-        triage_dict = {
-            "level": triage_result.value.upper(),
-            "explanation": None,
-            "next_steps": [],
-            "disclaimer": (
-                "This is not a medical diagnosis. CareBuddy is a triage "
-                "assistance tool only. Always consult a qualified healthcare "
-                "professional for medical advice."
-            ),
-        }
+        guidance = TRIAGE_GUIDANCE[triage_result]
+        triage_schema = TriageResultSchema(
+            level=triage_result.value.upper(),
+            explanation=guidance["explanation"],
+            next_steps=guidance["next_steps"],
+        )
 
     await db.commit()
 
@@ -115,7 +142,7 @@ async def send_message(
         message_id=assistant_msg.id,
         reply=reply,
         tts_text=reply,
-        triage_result=triage_dict,
+        triage_result=triage_schema,
         is_emergency=triage_result == TriageResult.EMERGENCY,
         session_complete=session_complete,
         timestamp=assistant_msg.created_at.isoformat() if assistant_msg.created_at else None,

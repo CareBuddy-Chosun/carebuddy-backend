@@ -10,11 +10,11 @@ from app.core.database import Base, engine
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create all tables on startup
-    async with engine.begin() as conn:
-        # Import models so they register with Base.metadata
-        from app.models import session, user  # noqa: F401
-        await conn.run_sync(Base.metadata.create_all)
+    # Auto-create tables in development only (production uses Alembic migrations)
+    if settings.APP_ENV != "production":
+        async with engine.begin() as conn:
+            from app.models import session, user  # noqa: F401
+            await conn.run_sync(Base.metadata.create_all)
     yield
 
 

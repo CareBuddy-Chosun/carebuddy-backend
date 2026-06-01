@@ -2,9 +2,12 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, Uuid
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.core.database import Base
+
+VALID_TRIAGE_VALUES = {"emergency", "visit_hospital", "home_care"}
+VALID_ROLES = {"user", "assistant"}
 
 
 class Session(Base):
@@ -17,6 +20,12 @@ class Session(Base):
         Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     triage_result: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    @validates("triage_result")
+    def validate_triage_result(self, _key: str, value: str | None) -> str | None:
+        if value is not None and value not in VALID_TRIAGE_VALUES:
+            raise ValueError(f"Invalid triage_result: {value}")
+        return value
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     audio_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -39,6 +48,12 @@ class Message(Base):
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    @validates("role")
+    def validate_role(self, _key: str, value: str) -> str:
+        if value not in VALID_ROLES:
+            raise ValueError(f"Invalid role: {value}")
+        return value
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
