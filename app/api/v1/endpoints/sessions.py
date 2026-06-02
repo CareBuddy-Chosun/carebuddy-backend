@@ -207,35 +207,43 @@ async def send_message(
             if assessment
             else {slot: False for slot in REQUIRED_SLOTS}
         )
+        assess_triage = (assessment or {}).get("triage")
         user_turns = sum(1 for m in session.messages if m.role == "user") + 1
         missing = first_missing_slot(slots)
-        finalize = missing is None or user_turns >= MAX_TURNS_BEFORE_TRIAGE
 
-        # 2) Drive the reply: ask about the first missing slot, or (when all
-        #    slots are filled / cap reached) give a brief close-out. The dialogue
-        #    stays in the user's own language so wording is read exactly.
-        if finalize:
-            triage_result = (assessment or {}).get("triage") or TriageResult.VISIT_HOSPITAL
-            directive = closing_directive(lang)
-            fallback = closing_fallback(lang)
+        if assess_triage == TriageResult.EMERGENCY:
+            # Safety first: escalate immediately even if some slots are still
+            # missing (e.g. fracture / extreme pain stated up front).
+            is_emergency = True
+            triage_result = TriageResult.EMERGENCY
+            reply = clean_reply(EMERGENCY_REPLY[lang])
         else:
-            triage_result = None
-            directive = ask_directive(lang, missing)
-            fallback = fallback_question(lang, missing)
+            # 2) Drive the reply: ask the first missing slot, or (all slots
+            #    filled / cap reached) give a brief close-out. Dialogue stays in
+            #    the user's own language so wording is read exactly.
+            finalize = missing is None or user_turns >= MAX_TURNS_BEFORE_TRIAGE
+            if finalize:
+                triage_result = assess_triage or TriageResult.VISIT_HOSPITAL
+                directive = closing_directive(lang)
+                fallback = closing_fallback(lang)
+            else:
+                triage_result = None
+                directive = ask_directive(lang, missing)
+                fallback = fallback_question(lang, missing)
 
-        messages = build_triage_messages(
-            history, data.content, language=lang, directive=directive
-        )
-        response = await llm_client.chat.completions.create(
-            model=settings.LLM_MODEL,
-            messages=messages,
-            max_tokens=300,
-            temperature=0.3,
-        )
-        reply = clean_reply(response.choices[0].message.content or "")
-        # Never show an empty bubble — fall back to the templated line.
-        if not reply:
-            reply = fallback
+            messages = build_triage_messages(
+                history, data.content, language=lang, directive=directive
+            )
+            response = await llm_client.chat.completions.create(
+                model=settings.LLM_MODEL,
+                messages=messages,
+                max_tokens=300,
+                temperature=0.3,
+            )
+            reply = clean_reply(response.choices[0].message.content or "")
+            # Never show an empty bubble — fall back to the templated line.
+            if not reply:
+                reply = fallback
 
     # Persist messages
     user_msg = Message(session_id=session.id, role="user", content=data.content)
