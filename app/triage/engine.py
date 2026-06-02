@@ -12,11 +12,17 @@ EMERGENCY_KEYWORDS = [
     "심장마비", "뇌졸중", "의식 잃", "의식이 없", "기절",
     "경련", "발작", "대량 출혈", "피가 안 멈", "질식",
     "쓰러졌", "의식불명", "심정지",
+    # 외상·골절·출혈·마비 (acute trauma / fracture / bleeding / paralysis)
+    "부러졌", "부러진", "골절", "뼈가", "심하게 다쳤", "크게 다쳤",
+    "피를 많이", "출혈이 심", "피가 많이", "마비", "감각이 없",
+    "말이 어눌", "한쪽이 안", "심한 복통",
     # English (keep for bilingual support)
     "can't breathe", "cannot breathe", "difficulty breathing", "chest pain",
     "heart attack", "stroke", "unconscious", "fainting", "fainted",
     "seizure", "severe bleeding", "not breathing", "choking",
     "loss of consciousness", "unresponsive",
+    "broken bone", "broken leg", "broken arm", "fracture", "fractured",
+    "paralysis", "can't move", "cannot move", "heavy bleeding",
 ]
 
 
@@ -88,22 +94,21 @@ TRIAGE_SYSTEM_PROMPT = """당신은 CareBuddy, 음성 기반 AI 의료 분류 �
 # A separate structured pass decides whether enough has been collected and which
 # triage level applies. The conversational model above is unreliable at emitting
 # machine tags inline, so we don't depend on it for classification.
-_ASSESSMENT_SYSTEM_PROMPT = """You analyze a medical triage conversation (which may be in Korean) and report what has been collected so far.
-Respond with ONLY a JSON object, no other text:
+_ASSESSMENT_SYSTEM_PROMPT = """You analyze a medical triage conversation (often in Korean) and report, as JSON ONLY:
 {"main": bool, "onset": bool, "severity": bool, "assoc": bool, "history": bool, "triage": "EMERGENCY" | "VISIT_HOSPITAL" | "HOME_CARE" | null}
 
-Field meaning (true only if clearly established in the conversation):
+Read the ENTIRE conversation. The patient may give several facts in ONE message — mark EVERY field that is established anywhere, even if all were stated at once. A field is true if the info is present OR explicitly absent (e.g. "none", "없어", "없습니다").
 - main: the chief symptom and its body location are known
 - onset: when it started and/or how long it has lasted is known
-- severity: how severe/intense it is is known
-- assoc: associated symptoms (or their clear absence) are known
-- history: underlying conditions / current medications (or their clear absence) are known
+- severity: how severe it is — INCLUDING a number on a 1-10 scale (e.g. "10", "통증 8", "pain is 9")
+- assoc: accompanying symptoms are known, or the patient said there are none
+- history: underlying conditions / medications are known, or the patient said there are none
 
-triage: set ONLY when all five fields are true; otherwise null. When set, classify by urgency:
-- EMERGENCY: life-threatening signs (severe chest pain, breathing difficulty, altered consciousness, etc.)
-- VISIT_HOSPITAL: should be seen by a clinician within ~24h
-- HOME_CARE: mild, can be observed at home
-"""
+triage:
+- Set "EMERGENCY" IMMEDIATELY — even if some fields are still false — for life-threatening or acute severe signs: severe chest pain, difficulty breathing, altered consciousness, stroke signs (face droop / slurred speech / one-sided weakness), seizure, uncontrolled bleeding, a bone fracture or major trauma, or extreme pain (>= 8 out of 10) from an acute injury.
+- Otherwise set "VISIT_HOSPITAL" or "HOME_CARE" ONLY when all five fields are true (VISIT_HOSPITAL = needs a clinician within ~24h; HOME_CARE = mild, observe at home).
+- Otherwise null.
+Respond with ONLY the JSON object — no markdown, no explanation."""
 
 
 def format_conversation(
@@ -135,7 +140,17 @@ def _parse_assessment(raw: str) -> dict | None:
         data = json.loads(match.group(0))
     except (ValueError, TypeError):
         return None
-    slots = {slot: bool(data.get(slot)) for slot in REQUIRED_SLOTS}
+
+    def _truthy(v) -> bool:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return v != 0
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "yes", "y", "1")
+        return False
+
+    slots = {slot: _truthy(data.get(slot)) for slot in REQUIRED_SLOTS}
     level = None
     triage = data.get("triage")
     if isinstance(triage, str) and triage.strip().lower() in (
